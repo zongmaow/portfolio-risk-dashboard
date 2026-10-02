@@ -131,8 +131,7 @@ if run:
         )
         st.caption(
             "Historical makes no distributional assumption; parametric assumes "
-            "normality; Student-t Monte Carlo fits fat tails, so the three "
-            "models genuinely differ."
+            "normality; Student-t Monte Carlo fits fat tails."
         )
         st.plotly_chart(
             rolling_var_chart(rolling_var(port_rets, confidence=confidence), confidence),
@@ -267,8 +266,7 @@ if run:
             ),
             use_container_width=True,
         )
-        # One-line takeaway generated from the table, so the comparison
-        # states its own conclusion instead of leaving it to the reader.
+        # One-line summary generated from the table.
         def _kupiec_phrase(t):
             if t["reject_h0"] is None:
                 return "inconclusive (p = n/a)"
@@ -288,7 +286,7 @@ if run:
         else:
             change = f"leaves violations unchanged at {test['violations']}"
         takeaway = (
-            f"**Takeaway:** conditioning VaR on the volatility regime "
+            f"**Summary:** conditioning VaR on the volatility regime "
             f"{change} (expected ≈ {reg_test['expected']:.1f}). "
             f"Kupiec H₀: single-window {_kupiec_phrase(test)}; "
             f"regime-aware {_kupiec_phrase(reg_test)}."
@@ -298,22 +296,14 @@ if run:
                 f" Independence p-value: {cc['p_ind']:.3f} "
                 f"→ {reg_cc['p_ind']:.3f}."
             )
-        if test["reject_h0"] and reg_test["reject_h0"] is False:
-            takeaway += (
-                " The single-window rejection disappears once the regime "
-                "is conditioned on — the failure came from volatility "
-                "regime change, not a mis-estimated quantile."
-            )
         st.info(takeaway)
         st.plotly_chart(
             backtest_chart(port_rets, reg_var, regimes=reg),
             use_container_width=True,
         )
         st.caption(
-            "Orange bands mark high-volatility regimes. If violations cluster "
-            "inside them under the single-window model but the regime-aware "
-            "band stays calibrated, the failure came from regime change — "
-            "not from mis-measuring a quantile on any single day."
+            "Orange bands mark high-volatility regimes; the regime-aware "
+            "VaR band widens inside them."
         )
 
     with tab5:

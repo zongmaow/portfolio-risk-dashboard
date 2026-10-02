@@ -1,8 +1,8 @@
 # Portfolio Risk Dashboard
 
-*When does historical VaR fail? A regime-aware backtesting study on equity portfolios (2022–).*
+Equity portfolio VaR, stress tests, and a simple volatility-regime backtest.
 
-An interactive portfolio risk analytics dashboard: build a custom equity portfolio, then measure its market risk with industry-standard metrics — VaR (three methods), Expected Shortfall, rolling risk, drawdowns, correlation structure, stress scenarios, VaR backtesting, and sector exposure.
+A Streamlit dashboard for market risk on a custom equity portfolio. It computes VaR and Expected Shortfall three ways, runs stress scenarios, and backtests the VaR — including a version conditioned on the volatility regime.
 
 Built with **Python · Streamlit · yfinance · Plotly**.
 
@@ -11,7 +11,7 @@ Built with **Python · Streamlit · yfinance · Plotly**.
 | Tab | What it shows |
 |---|---|
 | Overview | Cumulative portfolio returns, drawdown chart, KPI cards (VaR, CVaR, vol, Sharpe, max drawdown) |
-| Risk Metrics | VaR / Expected Shortfall comparison across three genuinely different models (historical, normal parametric, Student-t Monte Carlo), rolling 63-day VaR, asset correlation heatmap |
+| Risk Metrics | VaR / Expected Shortfall comparison across three models (historical, normal parametric, Student-t Monte Carlo), rolling 63-day VaR, asset correlation heatmap |
 | Stress Testing | -5% / -10% / -20% market shocks, worst 21-day in-sample replay, custom shock slider, single-factor (SPY beta) shock |
 | Backtesting | Kupiec POF + Christoffersen independence tests on the lagged rolling VaR model, violation timeline, and a **regime-aware VaR** comparison (high/low volatility regimes with shaded bands) |
 | Sector Exposure | Portfolio weights aggregated by GICS sector |
@@ -45,29 +45,29 @@ python -m unittest discover tests
 
 ## Methodology
 
-- **Returns**: simple (arithmetic) daily returns from adjusted-close prices (yfinance). Arithmetic returns are exact under portfolio weighting and compound correctly with `(1 + r).cumprod()` — a previous version mixed weighted log returns with arithmetic compounding and was fixed after review.
+- **Returns**: simple (arithmetic) daily returns from adjusted-close prices (yfinance). Arithmetic returns are exact under portfolio weighting and compound correctly with `(1 + r).cumprod()`.
 - **VaR** reported as a positive loss number at the chosen confidence level:
   - *Historical simulation* — empirical quantile of the return distribution.
   - *Parametric* — normal assumption, μ + σ·z.
   - *Monte Carlo (Student-t)* — 10,000 simulated one-day returns from a Student-t fitted to the data, capturing fat tails the normal model misses.
 - **CVaR / Expected Shortfall** — mean loss conditional on breaching VaR, computed for all three models (historical, normal closed form, Student-t Monte Carlo).
 - **Stress tests** — hypothetical uniform shocks, a single-factor shock using each asset's SPY beta, plus a historical replay: the worst 21-day cumulative loss observed in-sample, re-applied as "what if it happened again".
-- **Backtesting** — Kupiec POF test plus Christoffersen independence test. The VaR series is **lagged by one day**: day-t returns are tested against VaR estimated on data up to t-1, so there is no look-ahead. H₀ is that the observed violation rate equals 1 − confidence and violations do not cluster. A rejection flags a mismatch worth investigating (regime change, fat tails, window choice), not an automatic model invalidation.
-- **Regime-aware VaR** — each day is classified into a high/low volatility regime from its trailing 21-day realized vol vs. the expanding median (both lagged, so no look-ahead). VaR is then estimated only from past days in the *same* regime, so the band widens automatically when volatility clusters. The point is diagnostic, not predictive: clustered violations usually come from regime change, not from mis-measuring a quantile on any single day.
+- **Backtesting** — Kupiec POF test plus Christoffersen independence test. The VaR series is **lagged by one day**: day-t returns are tested against VaR estimated on data up to t-1, so there is no look-ahead. H₀ is that the observed violation rate equals 1 − confidence and violations do not cluster. A rejection usually points at regime change, fat tails, or window choice.
+- **Regime-aware VaR** — each day is classified into a high/low volatility regime from its trailing 21-day realized vol vs. the expanding median (both lagged, so no look-ahead). VaR is then estimated only from past days in the *same* regime, so the band widens automatically when volatility clusters. It is a diagnostic check, not a forecasting model.
 
 ## Assumptions and Limitations
 
-| Assumption | Where it lives | What it implies |
-|---|---|---|
-| Simple returns throughout | `src/risk_metrics.py` | Exact under weighting; no log/arithmetic mixing (fixed 2026-10-02 after review) |
-| Backtest uses lagged VaR (t−1) | `app.py`, `src/risk_metrics.py` | No look-ahead: estimation window excludes the tested day |
-| Volatility regime is a simple vol proxy | `src/risk_metrics.py` | Trailing 21d vol vs expanding median, both lagged; not a fitted HMM — regimes are descriptive, not structural |
-| Simple returns are ~normal (parametric VaR) | `src/risk_metrics.py` | Understates tail risk for fat-tailed assets; historical VaR and Student-t MC do not make this assumption |
-| 252 trading days per year | `src/risk_metrics.py` | Annualized vol/Sharpe scale with √252 |
-| Weights normalized to 1, no leverage | `src/risk_metrics.py` | Long-only, fully invested portfolio |
-| Uniform shock hits all assets equally | `src/stress_testing.py` | Ignores beta differences across holdings; the SPY-beta shock is the structured alternative |
-| Sector via yfinance info, static fallback | `src/data.py` | Sector for exotic tickers may show as "Unknown" |
-| Survivorship-free data not guaranteed | `src/data.py` | Delisted tickers simply have no price history |
+| Assumption | What it implies |
+|---|---|
+| Simple returns throughout | Exact under weighting; no log/arithmetic mixing |
+| Backtest uses lagged VaR (t−1) | No look-ahead: estimation window excludes the tested day |
+| Volatility regime is a simple vol proxy | Trailing 21d vol vs expanding median, both lagged; not a fitted HMM — regimes are descriptive, not structural |
+| Simple returns are ~normal (parametric VaR) | Understates tail risk for fat-tailed assets; historical VaR and Student-t MC do not make this assumption |
+| 252 trading days per year | Annualized vol/Sharpe scale with √252 |
+| Weights normalized to 1, no leverage | Long-only, fully invested portfolio |
+| Uniform shock hits all assets equally | Ignores beta differences across holdings; the SPY-beta shock is the structured alternative |
+| Sector via yfinance info, static fallback | Sector for exotic tickers may show as "Unknown" |
+| Survivorship-free data not guaranteed | Delisted tickers simply have no price history |
 
 ## Project Structure
 
@@ -88,9 +88,8 @@ Core logic is deliberately kept as pure functions (no Streamlit, no I/O) so it c
 
 ## What I Learned
 
-- Annualization is a silent bug factory: mixing daily and annualized units in one formula produces plausible-looking but wrong numbers — the unit tests pin these down.
-- Reporting a backtest *rejection* honestly is more credible than tuning the window until H₀ passes.
-- Streamlit caching belongs at the app layer (`data.py` stays framework-free), otherwise tests import UI code.
+- Mixing daily returns with annualized volatility in one formula gives numbers that look right and aren't. The unit tests now pin the √252 scaling so it stays fixed.
+- Streamlit caching belongs at the app layer (`data.py` stays framework-free), otherwise tests end up importing UI code.
 
 ## Disclaimer
 
