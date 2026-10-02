@@ -10,10 +10,12 @@ from src.risk_metrics import (
     cvar_historical,
     cvar_monte_carlo_t,
     cvar_parametric,
+    detect_vol_regime,
     drawdown_series,
     kupiec_pof_test,
     max_drawdown,
     portfolio_returns,
+    regime_rolling_var,
     rolling_var,
     sharpe_ratio,
     simple_returns,
@@ -159,6 +161,46 @@ class TestRiskMetrics(unittest.TestCase):
         worst = worst_n_day_loss(self.port, window=21)
         self.assertLess(worst["worst_return"], 0)
         self.assertEqual(worst["window_days"], 21)
+        # start/end cut on actual trading days
+        n_days = len(self.port.loc[worst["start_date"]:worst["end_date"]])
+        self.assertEqual(n_days, 21)
+
+    def test_regime_detection_no_lookahead(self):
+        rng = np.random.default_rng(0)
+        calm = rng.normal(0, 0.005, 300)
+        wild = rng.normal(0, 0.03, 300)
+        r = pd.Series(np.concatenate([calm, wild]))
+        reg = detect_vol_regime(r)
+        early = reg.iloc[:200].dropna()
+        late = reg.iloc[450:].dropna()
+        self.assertTrue(len(early) > 50 and len(late) > 50)
+        # 'high' labels must concentrate after the vol jump, not before
+        self.assertGreater(
+            (late == "high").mean(), (early == "high").mean() + 0.3
+        )
+        self.assertTrue(set(reg.dropna().unique()) <= {"high", "low"})
+
+    def test_regime_var_no_lookahead(self):
+        # An extreme return on the last day must not change any VaR
+        # estimate (each day's VaR uses only strictly past data).
+        r = pd.Series(np.random.default_rng(1).normal(0, 0.01, 400))
+        v1 = regime_rolling_var(r)
+        r2 = r.copy()
+        r2.iloc[-1] = -0.5
+        v2 = regime_rolling_var(r2)
+        pd.testing.assert_series_equal(v1, v2)
+
+    def test_regime_var_widens_in_high_vol(self):
+        rng = np.random.default_rng(2)
+        calm = rng.normal(0, 0.005, 400)
+        wild = rng.normal(0, 0.04, 400)
+        r = pd.Series(np.concatenate([calm, wild]))
+        v = regime_rolling_var(r)
+        reg = detect_vol_regime(r)
+        high_v = v[reg == "high"].dropna()
+        low_v = v[reg == "low"].dropna()
+        self.assertTrue(len(high_v) > 20 and len(low_v) > 20)
+        self.assertGreater(high_v.median(), low_v.median())
 
 
 if __name__ == "__main__":

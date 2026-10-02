@@ -20,9 +20,11 @@ from src.risk_metrics import (
     cvar_historical,
     cvar_monte_carlo_t,
     cvar_parametric,
+    detect_vol_regime,
     kupiec_pof_test,
     max_drawdown,
     portfolio_returns,
+    regime_rolling_var,
     rolling_var,
     sharpe_ratio,
     simple_returns,
@@ -58,10 +60,14 @@ portfolio_value = st.sidebar.number_input(
 
 tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 raw_weights = [float(w) for w in weights_input.split(",") if w.strip()]
-weights = pd.Series(
-    raw_weights if len(raw_weights) == len(tickers) else [1.0] * len(tickers),
-    index=tickers,
-)
+if len(raw_weights) == len(tickers):
+    weights = pd.Series(raw_weights, index=tickers)
+else:
+    st.warning(
+        "Weight count doesn't match the ticker count — "
+        "falling back to equal weights."
+    )
+    weights = pd.Series([1.0] * len(tickers), index=tickers)
 weights = weights / weights.sum()
 
 run = st.sidebar.button("Run analysis", type="primary")
@@ -227,6 +233,46 @@ if run:
             "independence test. A rejected H₀ does not invalidate the model "
             "outright — it flags a mismatch worth investigating (regime "
             "change, fat tails, window choice)."
+        )
+
+        st.subheader("Regime-aware VaR: do volatility clusters explain the violations?")
+        st.write(
+            "Each day is classified into a **high/low volatility regime** "
+            "from its trailing 21-day realized vol vs. the expanding median "
+            "(both lagged — no look-ahead). VaR is then estimated only from "
+            "past days in the *same* regime, so the band widens automatically "
+            "when volatility clusters."
+        )
+        reg_var = regime_rolling_var(port_rets, confidence=confidence)
+        reg = detect_vol_regime(port_rets)
+        reg_test = kupiec_pof_test(port_rets, reg_var, confidence)
+        reg_cc = christoffersen_cc_test(port_rets, reg_var, confidence)
+        comp = pd.DataFrame(
+            {
+                "Violations": [test["violations"], reg_test["violations"]],
+                "Expected": [test["expected"], reg_test["expected"]],
+                "Kupiec p-value": [test["p_value"], reg_test["p_value"]],
+                "Independence p-value": [cc["p_ind"], reg_cc["p_ind"]],
+            },
+            index=["Single-window (63d)", "Regime-aware"],
+        )
+        st.dataframe(
+            comp.style.format(
+                {"Violations": "{:.0f}", "Expected": "{:.1f}",
+                 "Kupiec p-value": "{:.4f}", "Independence p-value": "{:.4f}"},
+                na_rep="n/a",
+            ),
+            use_container_width=True,
+        )
+        st.plotly_chart(
+            backtest_chart(port_rets, reg_var, regimes=reg),
+            use_container_width=True,
+        )
+        st.caption(
+            "Orange bands mark high-volatility regimes. If violations cluster "
+            "inside them under the single-window model but the regime-aware "
+            "band stays calibrated, the failure came from regime change — "
+            "not from mis-measuring a quantile on any single day."
         )
 
     with tab5:

@@ -37,11 +37,15 @@ def factor_shock_pnl(
 
 
 def worst_n_day_loss(returns: pd.Series, window: int = 21) -> dict:
-    """Find the worst `window`-day cumulative return in the sample."""
+    """Find the worst `window`-day cumulative return in the sample.
+
+    The window is cut on actual trading days (no calendar-day approximation).
+    """
     rolling_cum = (1 + returns).rolling(window).apply(np.prod, raw=True) - 1
     worst = float(rolling_cum.min())
     end_date = rolling_cum.idxmin()
-    start_date = end_date - pd.Timedelta(days=int(window * 1.6))
+    window_ret = returns.loc[:end_date].iloc[-window:]
+    start_date = window_ret.index[0]
     return {
         "worst_return": worst,
         "window_days": window,

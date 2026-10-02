@@ -1,5 +1,7 @@
 # Portfolio Risk Dashboard
 
+*When does historical VaR fail? A regime-aware backtesting study on equity portfolios (2022–).*
+
 An interactive portfolio risk analytics dashboard: build a custom equity portfolio, then measure its market risk with industry-standard metrics — VaR (three methods), Expected Shortfall, rolling risk, drawdowns, correlation structure, stress scenarios, VaR backtesting, and sector exposure.
 
 Built with **Python · Streamlit · yfinance · Plotly**.
@@ -11,7 +13,7 @@ Built with **Python · Streamlit · yfinance · Plotly**.
 | Overview | Cumulative portfolio returns, drawdown chart, KPI cards (VaR, CVaR, vol, Sharpe, max drawdown) |
 | Risk Metrics | VaR / Expected Shortfall comparison across three genuinely different models (historical, normal parametric, Student-t Monte Carlo), rolling 63-day VaR, asset correlation heatmap |
 | Stress Testing | -5% / -10% / -20% market shocks, worst 21-day in-sample replay, custom shock slider, single-factor (SPY beta) shock |
-| Backtesting | Kupiec proportion-of-failures test + Christoffersen independence test on the lagged rolling VaR model (LR statistics + p-values), violation timeline chart |
+| Backtesting | Kupiec POF + Christoffersen independence tests on the lagged rolling VaR model, violation timeline, and a **regime-aware VaR** comparison (high/low volatility regimes with shaded bands) |
 | Sector Exposure | Portfolio weights aggregated by GICS sector |
 
 ## Screenshots
@@ -20,6 +22,7 @@ Default demo portfolio: AAPL / MSFT / NVDA / JPM / XOM (2022–present, 95% VaR)
 
 ![Cumulative portfolio returns](screenshots/tab1a_cumulative.png)
 ![Rolling 63-day VaR](screenshots/tab2a_rolling_var.png)
+![Regime-aware backtest: violations cluster in high-volatility regimes (shaded), where the VaR band widens](screenshots/tab4_regime_backtest.svg)
 ![Stress test summary](screenshots/tab3_stress.png)
 ![Sector exposure](screenshots/tab5_sector.png)
 
@@ -50,6 +53,7 @@ python -m unittest discover tests
 - **CVaR / Expected Shortfall** — mean loss conditional on breaching VaR, computed for all three models (historical, normal closed form, Student-t Monte Carlo).
 - **Stress tests** — hypothetical uniform shocks, a single-factor shock using each asset's SPY beta, plus a historical replay: the worst 21-day cumulative loss observed in-sample, re-applied as "what if it happened again".
 - **Backtesting** — Kupiec POF test plus Christoffersen independence test. The VaR series is **lagged by one day**: day-t returns are tested against VaR estimated on data up to t-1, so there is no look-ahead. H₀ is that the observed violation rate equals 1 − confidence and violations do not cluster. A rejection flags a mismatch worth investigating (regime change, fat tails, window choice), not an automatic model invalidation.
+- **Regime-aware VaR** — each day is classified into a high/low volatility regime from its trailing 21-day realized vol vs. the expanding median (both lagged, so no look-ahead). VaR is then estimated only from past days in the *same* regime, so the band widens automatically when volatility clusters. The point is diagnostic, not predictive: clustered violations usually come from regime change, not from mis-measuring a quantile on any single day.
 
 ## Assumptions and Limitations
 
@@ -57,7 +61,8 @@ python -m unittest discover tests
 |---|---|---|
 | Simple returns throughout | `src/risk_metrics.py` | Exact under weighting; no log/arithmetic mixing (fixed 2026-10-02 after review) |
 | Backtest uses lagged VaR (t−1) | `app.py`, `src/risk_metrics.py` | No look-ahead: estimation window excludes the tested day |
-| Log returns are ~normal (parametric VaR) | `src/risk_metrics.py` | Understates tail risk for fat-tailed assets; historical VaR and Student-t MC do not make this assumption |
+| Volatility regime is a simple vol proxy | `src/risk_metrics.py` | Trailing 21d vol vs expanding median, both lagged; not a fitted HMM — regimes are descriptive, not structural |
+| Simple returns are ~normal (parametric VaR) | `src/risk_metrics.py` | Understates tail risk for fat-tailed assets; historical VaR and Student-t MC do not make this assumption |
 | 252 trading days per year | `src/risk_metrics.py` | Annualized vol/Sharpe scale with √252 |
 | Weights normalized to 1, no leverage | `src/risk_metrics.py` | Long-only, fully invested portfolio |
 | Uniform shock hits all assets equally | `src/stress_testing.py` | Ignores beta differences across holdings; the SPY-beta shock is the structured alternative |

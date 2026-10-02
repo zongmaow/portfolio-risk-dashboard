@@ -161,6 +161,52 @@ def beta_to_market(
     return pd.Series(betas)
 
 
+def detect_vol_regime(
+    returns: pd.Series, vol_window: int = 21, min_periods: int = 63
+) -> pd.Series:
+    """Classify each day into a volatility regime ('high' / 'low').
+
+    The regime is a trailing realized-volatility proxy: the rolling
+    `vol_window`-day std of returns versus its expanding median. Both the
+    volatility and the threshold are lagged by one day, so the label at t
+    uses only information available at t-1 — no look-ahead.
+    """
+    r = returns.dropna()
+    rv = r.rolling(vol_window).std().shift(1)
+    thresh = rv.expanding(min_periods=min_periods).median().shift(1)
+    regime = pd.Series(np.where(rv > thresh, "high", "low"), index=r.index)
+    regime[rv.isna() | thresh.isna()] = np.nan
+    return regime
+
+
+def regime_rolling_var(
+    returns: pd.Series,
+    confidence: float = 0.95,
+    window: int = 63,
+    vol_window: int = 21,
+    min_obs: int = 20,
+) -> pd.Series:
+    """Regime-aware rolling historical VaR (positive loss numbers).
+
+    For each day t, VaR is the empirical quantile over the most recent
+    `window` past returns that share day-t's volatility regime. Only data
+    strictly before t is used, so the series is a genuine forecast and is
+    directly backtestable WITHOUT an extra shift.
+    """
+    r = returns.dropna()
+    regime = detect_vol_regime(r, vol_window=vol_window)
+    out = pd.Series(np.nan, index=r.index)
+    vals = r.to_numpy()
+    reg = regime.to_numpy()
+    for i in range(len(r)):
+        if pd.isna(reg[i]):
+            continue
+        tail = vals[:i][reg[:i] == reg[i]][-window:]
+        if len(tail) >= min_obs:
+            out.iloc[i] = -np.quantile(tail, 1 - confidence)
+    return out
+
+
 def kupiec_pof_test(
     returns: pd.Series, var_series: pd.Series, confidence: float = 0.95
 ) -> dict:

@@ -78,15 +78,38 @@ def stress_bar_chart(stress_df: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def backtest_chart(returns: pd.Series, var_series: pd.Series) -> go.Figure:
+def backtest_chart(
+    returns: pd.Series,
+    var_series: pd.Series,
+    regimes: pd.Series | None = None,
+) -> go.Figure:
     """Violation timeline: daily returns vs the (lagged) VaR band.
 
     Red dots mark violations (return worse than -VaR). Clustering of dots
-    is what the Christoffersen independence test formalizes.
+    is what the Christoffersen independence test formalizes. When `regimes`
+    is given, high-volatility stretches are shaded so the eye can check
+    whether violations cluster inside them.
     """
     aligned = pd.DataFrame({"r": returns, "var": var_series}).dropna()
     viol = aligned[aligned["r"] < -aligned["var"]]
     fig = go.Figure()
+    if regimes is not None:
+        reg = regimes.dropna()
+        is_high = (reg == "high").to_numpy()
+        idx = reg.index
+        blocks, start = [], None
+        for t, v in zip(idx, is_high):
+            if v and start is None:
+                start = t
+            elif not v and start is not None:
+                blocks.append((start, t))
+                start = None
+        if start is not None:
+            blocks.append((start, idx[-1]))
+        for x0, x1 in blocks:
+            fig.add_vrect(
+                x0=x0, x1=x1, fillcolor="orange", opacity=0.12, line_width=0,
+            )
     fig.add_scatter(
         x=aligned.index, y=aligned["r"] * 100, mode="lines",
         name="Daily return", line=dict(color="steelblue", width=1),
