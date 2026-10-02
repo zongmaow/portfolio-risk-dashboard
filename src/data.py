@@ -42,7 +42,10 @@ def download_prices(tickers: list[str], start: str, end: str) -> pd.DataFrame:
     if isinstance(closes, pd.Series):  # single ticker comes back as Series
         closes = closes.to_frame(tickers[0])
     closes.columns = [str(c).upper() for c in closes.columns]
-    return closes.dropna(how="all").ffill().dropna()
+    closes = closes.dropna(how="all").ffill().dropna()
+    if closes.empty:
+        raise ValueError(f"No price data downloaded for {tickers}.")
+    return closes
 
 
 def get_sectors(tickers: list[str]) -> dict[str, str]:

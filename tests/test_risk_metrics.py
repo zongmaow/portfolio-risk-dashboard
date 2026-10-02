@@ -2,20 +2,31 @@ import unittest
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 
 from src.risk_metrics import (
+    beta_to_market,
+    christoffersen_cc_test,
     cvar_historical,
+    cvar_monte_carlo_t,
+    cvar_parametric,
     drawdown_series,
     kupiec_pof_test,
-    log_returns,
     max_drawdown,
     portfolio_returns,
+    rolling_var,
     sharpe_ratio,
+    simple_returns,
     var_historical,
     var_monte_carlo,
+    var_monte_carlo_t,
     var_parametric,
 )
-from src.stress_testing import hypothetical_shock_pnl, worst_n_day_loss
+from src.stress_testing import (
+    factor_shock_pnl,
+    hypothetical_shock_pnl,
+    worst_n_day_loss,
+)
 
 
 def synthetic_prices(n=500, seed=7) -> pd.DataFrame:
@@ -32,7 +43,7 @@ class TestRiskMetrics(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.prices = synthetic_prices()
-        cls.rets = log_returns(cls.prices)
+        cls.rets = simple_returns(cls.prices)
         cls.w = pd.Series([0.5, 0.3, 0.2], index=["AAA", "BBB", "CCC"])
         cls.port = portfolio_returns(cls.rets, cls.w)
 
@@ -63,6 +74,34 @@ class TestRiskMetrics(unittest.TestCase):
         self.assertLess(abs(vh - vp) / vh, 0.40)
         self.assertLess(abs(vh - vm) / vh, 0.40)
 
+    def test_gold_standard_normal_var_es(self):
+        # Closed-form check against known population parameters.
+        rng = np.random.default_rng(123)
+        mu, sigma = 0.001, 0.02
+        r = pd.Series(rng.normal(mu, sigma, 200_000))
+        z = stats.norm.ppf(0.05)
+        var_true = -(mu + sigma * z)
+        es_true = sigma * stats.norm.pdf(z) / 0.05 - mu
+        self.assertAlmostEqual(
+            var_parametric(r, 0.95), var_true, delta=abs(var_true) * 0.01
+        )
+        self.assertAlmostEqual(
+            cvar_parametric(r, 0.95), es_true, delta=abs(es_true) * 0.01
+        )
+
+    def test_student_t_var_on_heavytail_data(self):
+        # On t-distributed data the t-MC VaR should track the theoretical
+        # t VaR more closely than the normal parametric VaR does.
+        r = pd.Series(
+            stats.t.rvs(df=4, loc=0.0005, scale=0.012, size=5000, random_state=7)
+        )
+        q = stats.t.ppf(0.05, df=4, loc=0.0005, scale=0.012)
+        vt = var_monte_carlo_t(r, 0.95, n_sims=20000, seed=1)
+        self.assertAlmostEqual(vt, -q, delta=abs(q) * 0.08)
+        # On heavy-tailed data the t model should track the true t quantile
+        # more closely than the normal parametric VaR does.
+        self.assertLess(abs(vt + q), abs(var_parametric(r, 0.95) + q))
+
     def test_drawdown_nonpositive(self):
         cum = (1 + self.port).cumprod()
         dd = drawdown_series(cum)
@@ -74,10 +113,46 @@ class TestRiskMetrics(unittest.TestCase):
         self.assertTrue(-5 < s < 5)
 
     def test_kupiec_output(self):
-        rvar = -self.port.rolling(63).quantile(0.05)
+        # Lagged VaR: estimate on data up to t-1, test day-t returns.
+        rvar = rolling_var(self.port, 63, 0.95).shift(1)
         res = kupiec_pof_test(self.port, rvar, 0.95)
         self.assertIn(res["violations"], range(res["n"] + 1))
         self.assertTrue(0 <= res["p_value"] <= 1)
+
+    def test_kupiec_rejects_misspecified_model(self):
+        # A deliberately too-tight VaR should be rejected.
+        rvar = rolling_var(self.port, 63, 0.95).shift(1) * 0.1
+        res = kupiec_pof_test(self.port, rvar, 0.95)
+        self.assertTrue(res["reject_h0"])
+
+    def test_christoffersen_output(self):
+        rvar = rolling_var(self.port, 63, 0.95).shift(1)
+        cc = christoffersen_cc_test(self.port, rvar, 0.95)
+        for key in ("lr_ind", "p_ind", "lr_cc", "p_cc"):
+            self.assertIn(key, cc)
+        if cc["p_cc"] is not None:
+            self.assertTrue(0 <= cc["p_cc"] <= 1)
+        self.assertEqual(
+            cc["transitions"]["n00"]
+            + cc["transitions"]["n01"]
+            + cc["transitions"]["n10"]
+            + cc["transitions"]["n11"],
+            cc["n"] - 1,
+        )
+
+    def test_beta_to_market(self):
+        rng = np.random.default_rng(0)
+        mkt = pd.Series(rng.normal(0, 0.01, 500))
+        asset = 1.5 * mkt + rng.normal(0, 0.001, 500)
+        betas = beta_to_market(pd.DataFrame({"A": asset}), mkt)
+        self.assertAlmostEqual(betas["A"], 1.5, delta=0.05)
+
+    def test_factor_shock(self):
+        w = pd.Series([0.6, 0.4], index=["A", "B"])
+        betas = pd.Series([1.5, 0.5], index=["A", "B"])
+        pnl, pb = factor_shock_pnl(w, betas, -0.10, 1_000_000)
+        self.assertAlmostEqual(pb, 1.1)
+        self.assertAlmostEqual(pnl, -110_000)
 
     def test_stress(self):
         self.assertAlmostEqual(hypothetical_shock_pnl(1_000_000, -0.10), -100_000)

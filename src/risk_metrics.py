@@ -4,6 +4,11 @@ All functions are pure (no I/O, no Streamlit) so they can be unit tested.
 Sign convention: VaR / CVaR are reported as POSITIVE numbers representing
 the worst expected loss over the horizon (e.g. VaR 95% = 0.023 means
 "we are 95% confident the one-day loss will not exceed 2.3%").
+
+Returns are simple (arithmetic) throughout: portfolio returns are exact
+under weighting, and (1 + r).cumprod() compounds correctly. (Log returns
+were used before 2026-10-02; mixing weighted log returns with arithmetic
+compounding is inconsistent, so they were removed.)
 """
 
 import numpy as np
@@ -13,9 +18,9 @@ from scipy import stats
 TRADING_DAYS = 252
 
 
-def log_returns(prices: pd.DataFrame) -> pd.DataFrame:
-    """Log returns from an adjusted-close price DataFrame."""
-    return np.log(prices / prices.shift(1)).dropna()
+def simple_returns(prices: pd.DataFrame) -> pd.DataFrame:
+    """Simple (arithmetic) returns from an adjusted-close price DataFrame."""
+    return prices.pct_change().dropna()
 
 
 def portfolio_returns(asset_returns: pd.DataFrame, weights: pd.Series) -> pd.Series:
@@ -50,6 +55,17 @@ def var_parametric(returns: pd.Series, confidence: float = 0.95) -> float:
     return float(-(mu + sigma * stats.norm.ppf(1 - confidence)))
 
 
+def cvar_parametric(returns: pd.Series, confidence: float = 0.95) -> float:
+    """Parametric (normal) CVaR / Expected Shortfall (positive loss number).
+
+    Closed form: ES = sigma * phi(z) / (1 - alpha) - mu,
+    where z = Phi^{-1}(1 - alpha).
+    """
+    mu, sigma = returns.mean(), returns.std()
+    z = stats.norm.ppf(1 - confidence)
+    return float(sigma * stats.norm.pdf(z) / (1 - confidence) - mu)
+
+
 def var_monte_carlo(
     returns: pd.Series,
     confidence: float = 0.95,
@@ -66,6 +82,39 @@ def var_monte_carlo(
         size=n_sims,
     )
     return float(-np.quantile(sims, 1 - confidence))
+
+
+def var_monte_carlo_t(
+    returns: pd.Series,
+    confidence: float = 0.95,
+    n_sims: int = 10_000,
+    seed: int = 42,
+) -> float:
+    """Monte Carlo VaR under a fitted Student-t distribution.
+
+    Unlike the normal MC above, the t distribution has fat tails, so this
+    is a genuinely different model rather than a noisier parametric VaR.
+    Reported as a positive loss number.
+    """
+    df, loc, scale = stats.t.fit(returns)
+    sims = stats.t.rvs(df, loc=loc, scale=scale, size=n_sims, random_state=seed)
+    return float(-np.quantile(sims, 1 - confidence))
+
+
+def cvar_monte_carlo_t(
+    returns: pd.Series,
+    confidence: float = 0.95,
+    n_sims: int = 10_000,
+    seed: int = 42,
+) -> float:
+    """Monte Carlo CVaR under a fitted Student-t distribution."""
+    df, loc, scale = stats.t.fit(returns)
+    sims = stats.t.rvs(df, loc=loc, scale=scale, size=n_sims, random_state=seed)
+    cutoff = np.quantile(sims, 1 - confidence)
+    tail = sims[sims <= cutoff]
+    if len(tail) == 0:
+        return var_monte_carlo_t(returns, confidence, n_sims, seed)
+    return float(-tail.mean())
 
 
 def cvar_historical(returns: pd.Series, confidence: float = 0.95) -> float:
@@ -96,6 +145,20 @@ def max_drawdown(cumulative: pd.Series) -> float:
 
 def correlation_matrix(asset_returns: pd.DataFrame) -> pd.DataFrame:
     return asset_returns.corr()
+
+
+def beta_to_market(
+    asset_returns: pd.DataFrame, market_returns: pd.Series
+) -> pd.Series:
+    """CAPM-style betas of each asset vs the market: beta = Cov(r_i, r_m) / Var(r_m)."""
+    aligned = pd.concat([asset_returns, market_returns.rename("__mkt__")], axis=1, join="inner")
+    mkt = aligned["__mkt__"]
+    var = mkt.var()
+    betas = {}
+    for col in asset_returns.columns:
+        col_s = aligned[col]
+        betas[col] = float(col_s.cov(mkt) / var) if var else 1.0
+    return pd.Series(betas)
 
 
 def kupiec_pof_test(
@@ -133,3 +196,76 @@ def kupiec_pof_test(
         "p_value": p_value,
         "reject_h0": bool(p_value < 0.05),
     }
+
+
+def christoffersen_cc_test(
+    returns: pd.Series, var_series: pd.Series, confidence: float = 0.95
+) -> dict:
+    """Christoffersen (1998) conditional-coverage backtest.
+
+    Extends Kupiec's unconditional test with an independence test:
+    violations should not cluster in time. LR_cc = LR_pof + LR_ind ~ chi2(2).
+
+    IMPORTANT: pass a *lagged* VaR series (estimated on data up to t-1)
+    so day-t returns are tested against information available at t-1.
+    """
+    aligned = pd.DataFrame({"r": returns, "var": var_series}).dropna()
+    viol = (aligned["r"] < -aligned["var"]).astype(int).to_numpy()
+    n = len(viol)
+    prev, curr = viol[:-1], viol[1:]
+    n00 = int(((prev == 0) & (curr == 0)).sum())
+    n01 = int(((prev == 0) & (curr == 1)).sum())
+    n10 = int(((prev == 1) & (curr == 0)).sum())
+    n11 = int(((prev == 1) & (curr == 1)).sum())
+    n_trans = n00 + n01 + n10 + n11
+    pof = kupiec_pof_test(returns, var_series, confidence)
+
+    def _safe(result_dict, lr_ind=None, p_ind=None, lr_cc=None, p_cc=None):
+        result_dict.update(
+            {
+                "lr_ind": lr_ind,
+                "p_ind": p_ind,
+                "lr_cc": lr_cc,
+                "p_cc": p_cc,
+                "reject_independence": None
+                if p_ind is None
+                else bool(p_ind < 0.05),
+                "reject_cc": None if p_cc is None else bool(p_cc < 0.05),
+                "transitions": {
+                    "n00": n00,
+                    "n01": n01,
+                    "n10": n10,
+                    "n11": n11,
+                },
+            }
+        )
+        return result_dict
+
+    base = {
+        "n": n,
+        "violations": int(viol.sum()),
+        "expected": (1 - confidence) * n,
+    }
+    if n_trans == 0 or min(n00 + n01, n10 + n11) == 0:
+        return _safe(base)
+    pi0 = n01 / (n00 + n01)
+    pi1 = n11 / (n10 + n11)
+    pi = (n01 + n11) / n_trans
+    if min(pi0, pi1, pi) in (0, 1):
+        return _safe(base)
+    lr_ind = -2 * np.log(
+        ((1 - pi) ** (n00 + n10) * pi ** (n01 + n11))
+        / (
+            (1 - pi0) ** n00
+            * pi0**n01
+            * (1 - pi1) ** n10
+            * pi1**n11
+        )
+    )
+    p_ind = float(1 - stats.chi2.cdf(lr_ind, df=1))
+    lr_pof = pof["lr_stat"]
+    if lr_pof is None or np.isnan(lr_pof):
+        return _safe(base, lr_ind=float(lr_ind), p_ind=p_ind)
+    lr_cc = float(lr_pof + lr_ind)
+    p_cc = float(1 - stats.chi2.cdf(lr_cc, df=2))
+    return _safe(base, lr_ind=float(lr_ind), p_ind=p_ind, lr_cc=lr_cc, p_cc=p_cc)

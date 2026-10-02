@@ -9,9 +9,9 @@ Built with **Python · Streamlit · yfinance · Plotly**.
 | Tab | What it shows |
 |---|---|
 | Overview | Cumulative portfolio returns, drawdown chart, KPI cards (VaR, CVaR, vol, Sharpe, max drawdown) |
-| Risk Metrics | Parametric vs Monte Carlo VaR comparison, rolling 63-day VaR, asset correlation heatmap |
-| Stress Testing | -5% / -10% / -20% market shocks, worst 21-day in-sample replay, custom shock slider |
-| Backtesting | Kupiec proportion-of-failures test on the rolling VaR model (LR statistic + p-value) |
+| Risk Metrics | VaR / Expected Shortfall comparison across three genuinely different models (historical, normal parametric, Student-t Monte Carlo), rolling 63-day VaR, asset correlation heatmap |
+| Stress Testing | -5% / -10% / -20% market shocks, worst 21-day in-sample replay, custom shock slider, single-factor (SPY beta) shock |
+| Backtesting | Kupiec proportion-of-failures test + Christoffersen independence test on the lagged rolling VaR model (LR statistics + p-values), violation timeline chart |
 | Sector Exposure | Portfolio weights aggregated by GICS sector |
 
 ## Screenshots
@@ -42,23 +42,25 @@ python -m unittest discover tests
 
 ## Methodology
 
-- **Returns**: log returns from adjusted-close prices (yfinance).
+- **Returns**: simple (arithmetic) daily returns from adjusted-close prices (yfinance). Arithmetic returns are exact under portfolio weighting and compound correctly with `(1 + r).cumprod()` — a previous version mixed weighted log returns with arithmetic compounding and was fixed after review.
 - **VaR** reported as a positive loss number at the chosen confidence level:
   - *Historical simulation* — empirical quantile of the return distribution.
   - *Parametric* — normal assumption, μ + σ·z.
-  - *Monte Carlo* — 10,000 simulated one-day returns from the fitted normal.
-- **CVaR / Expected Shortfall** — mean loss conditional on breaching VaR.
-- **Stress tests** — hypothetical uniform shocks plus a historical replay: the worst 21-day cumulative loss observed in-sample, re-applied as "what if it happened again".
-- **Backtesting** — Kupiec POF test: H₀ is that the observed violation rate equals 1 − confidence. A rejection flags a mismatch worth investigating (regime change, fat tails, window choice), not an automatic model invalidation.
+  - *Monte Carlo (Student-t)* — 10,000 simulated one-day returns from a Student-t fitted to the data, capturing fat tails the normal model misses.
+- **CVaR / Expected Shortfall** — mean loss conditional on breaching VaR, computed for all three models (historical, normal closed form, Student-t Monte Carlo).
+- **Stress tests** — hypothetical uniform shocks, a single-factor shock using each asset's SPY beta, plus a historical replay: the worst 21-day cumulative loss observed in-sample, re-applied as "what if it happened again".
+- **Backtesting** — Kupiec POF test plus Christoffersen independence test. The VaR series is **lagged by one day**: day-t returns are tested against VaR estimated on data up to t-1, so there is no look-ahead. H₀ is that the observed violation rate equals 1 − confidence and violations do not cluster. A rejection flags a mismatch worth investigating (regime change, fat tails, window choice), not an automatic model invalidation.
 
 ## Assumptions and Limitations
 
 | Assumption | Where it lives | What it implies |
 |---|---|---|
-| Log returns are ~normal (parametric / MC VaR) | `src/risk_metrics.py` | Understates tail risk for fat-tailed assets; historical VaR does not make this assumption |
+| Simple returns throughout | `src/risk_metrics.py` | Exact under weighting; no log/arithmetic mixing (fixed 2026-10-02 after review) |
+| Backtest uses lagged VaR (t−1) | `app.py`, `src/risk_metrics.py` | No look-ahead: estimation window excludes the tested day |
+| Log returns are ~normal (parametric VaR) | `src/risk_metrics.py` | Understates tail risk for fat-tailed assets; historical VaR and Student-t MC do not make this assumption |
 | 252 trading days per year | `src/risk_metrics.py` | Annualized vol/Sharpe scale with √252 |
 | Weights normalized to 1, no leverage | `src/risk_metrics.py` | Long-only, fully invested portfolio |
-| Uniform shock hits all assets equally | `src/stress_testing.py` | Ignores beta differences across holdings |
+| Uniform shock hits all assets equally | `src/stress_testing.py` | Ignores beta differences across holdings; the SPY-beta shock is the structured alternative |
 | Sector via yfinance info, static fallback | `src/data.py` | Sector for exotic tickers may show as "Unknown" |
 | Survivorship-free data not guaranteed | `src/data.py` | Delisted tickers simply have no price history |
 

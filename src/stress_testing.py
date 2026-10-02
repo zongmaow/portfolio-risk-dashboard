@@ -19,6 +19,23 @@ def hypothetical_shock_pnl(portfolio_value: float, shock: float) -> float:
     return portfolio_value * shock
 
 
+def factor_shock_pnl(
+    weights: pd.Series,
+    betas: pd.Series,
+    market_shock: float,
+    portfolio_value: float,
+) -> tuple[float, float]:
+    """P&L of a single-factor (market) shock, using each asset's beta.
+
+    Returns (pnl, portfolio_beta). Unlike the uniform shock above, assets
+    move in proportion to their market sensitivity.
+    """
+    w = weights / weights.sum()
+    b = betas.reindex(w.index).fillna(1.0)
+    port_beta = float((w * b).sum())
+    return portfolio_value * port_beta * market_shock, port_beta
+
+
 def worst_n_day_loss(returns: pd.Series, window: int = 21) -> dict:
     """Find the worst `window`-day cumulative return in the sample."""
     rolling_cum = (1 + returns).rolling(window).apply(np.prod, raw=True) - 1

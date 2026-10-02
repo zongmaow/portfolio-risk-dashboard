@@ -5,6 +5,7 @@ import streamlit as st
 
 from src.data import download_prices, get_sectors, sector_exposure
 from src.plotting import (
+    backtest_chart,
     correlation_heatmap,
     cumulative_returns_chart,
     drawdown_chart,
@@ -13,22 +14,32 @@ from src.plotting import (
 )
 from src.risk_metrics import (
     annualized_volatility,
+    beta_to_market,
+    christoffersen_cc_test,
     correlation_matrix,
     cvar_historical,
+    cvar_monte_carlo_t,
+    cvar_parametric,
     kupiec_pof_test,
-    log_returns,
     max_drawdown,
     portfolio_returns,
     rolling_var,
     sharpe_ratio,
+    simple_returns,
     var_historical,
-    var_monte_carlo,
+    var_monte_carlo_t,
     var_parametric,
 )
-from src.stress_testing import SHOCK_LEVELS, stress_summary
+from src.stress_testing import factor_shock_pnl, stress_summary
 
 st.set_page_config(page_title="Portfolio Risk Dashboard", layout="wide")
 st.title("Portfolio Risk Dashboard")
+
+
+@st.cache_data(show_spinner=False)
+def cached_prices(tickers: tuple, start: str, end: str) -> pd.DataFrame:
+    """Cached market-data download (keeps data.py free of Streamlit)."""
+    return download_prices(list(tickers), start, end)
 
 # ---------------- Sidebar ----------------
 st.sidebar.header("Portfolio Setup")
@@ -57,8 +68,12 @@ run = st.sidebar.button("Run analysis", type="primary")
 
 if run:
     with st.spinner("Downloading market data..."):
-        prices = download_prices(tickers, str(start_date), str(end_date))
-    asset_rets = log_returns(prices)
+        prices = cached_prices(
+            tuple(tickers), str(start_date), str(end_date)
+        )
+        mkt_prices = cached_prices(("SPY",), str(start_date), str(end_date))
+    asset_rets = simple_returns(prices)
+    mkt_rets = simple_returns(mkt_prices)["SPY"]
     port_rets = portfolio_returns(asset_rets, weights.loc[prices.columns])
     cumulative = (1 + port_rets).cumprod()
 
@@ -85,14 +100,33 @@ if run:
         st.plotly_chart(drawdown_chart(cumulative), use_container_width=True)
 
     with tab2:
-        col_a, col_b = st.columns(2)
-        col_a.metric(
-            "Parametric VaR",
-            f"{var_parametric(port_rets, confidence):.2%}",
+        comparison = pd.DataFrame(
+            {
+                "VaR": [
+                    var_historical(port_rets, confidence),
+                    var_parametric(port_rets, confidence),
+                    var_monte_carlo_t(port_rets, confidence),
+                ],
+                "Expected Shortfall": [
+                    cvar_historical(port_rets, confidence),
+                    cvar_parametric(port_rets, confidence),
+                    cvar_monte_carlo_t(port_rets, confidence),
+                ],
+            },
+            index=[
+                "Historical",
+                "Parametric (Normal)",
+                "Monte Carlo (Student-t, 10k sims)",
+            ],
         )
-        col_b.metric(
-            "Monte Carlo VaR (10k sims)",
-            f"{var_monte_carlo(port_rets, confidence):.2%}",
+        st.dataframe(
+            comparison.style.format("{:.2%}"),
+            use_container_width=True,
+        )
+        st.caption(
+            "Historical makes no distributional assumption; parametric assumes "
+            "normality; Student-t Monte Carlo fits fat tails, so the three "
+            "models genuinely differ."
         )
         st.plotly_chart(
             rolling_var_chart(rolling_var(port_rets, confidence=confidence), confidence),
@@ -117,17 +151,47 @@ if run:
             f"Custom shock P&L: **${portfolio_value * custom_shock / 100:,.0f}**"
         )
 
+        st.subheader("Single-factor shock (SPY betas)")
+        betas = beta_to_market(asset_rets, mkt_rets)
+        st.dataframe(
+            betas.rename("Beta vs SPY").to_frame().style.format("{:.2f}"),
+            use_container_width=True,
+        )
+        factor_pnl, port_beta = factor_shock_pnl(
+            weights.loc[prices.columns], betas, -0.10, portfolio_value
+        )
+        st.write(
+            f"SPY **-10%** with portfolio beta **{port_beta:.2f}**: "
+            f"**${factor_pnl:,.0f}**"
+        )
+        st.caption(
+            "Unlike the uniform shocks above, each asset moves in proportion "
+            "to its market sensitivity."
+        )
+
     with tab4:
-        rvar = rolling_var(port_rets, confidence=confidence)
+        # Lagged VaR: day-t returns are tested against the VaR estimated on
+        # data up to t-1. Without the shift this would be a look-ahead.
+        rvar = rolling_var(port_rets, confidence=confidence).shift(1)
         test = kupiec_pof_test(port_rets, rvar, confidence)
+        cc = christoffersen_cc_test(port_rets, rvar, confidence)
+        st.plotly_chart(
+            backtest_chart(port_rets, rvar), use_container_width=True
+        )
         st.write(f"**Sample:** {test['n']} trading days")
         st.write(
             f"**Violations:** {test['violations']} "
             f"(expected ≈ {test['expected']:.1f})"
         )
-        st.write(f"**LR statistic:** {test['lr_stat']:.3f}")
-        st.write(f"**p-value:** {test['p_value']:.4f}")
-        if test["reject_h0"]:
+        st.write(f"**Kupiec LR statistic:** {test['lr_stat']:.3f}")
+        st.write(f"**Kupiec p-value:** {test['p_value']:.4f}")
+        if test["reject_h0"] is None:
+            st.warning(
+                "Backtest inconclusive: zero (or all) violations, so the "
+                "test statistic is undefined. This is not evidence the "
+                "model is well calibrated."
+            )
+        elif test["reject_h0"]:
             st.error(
                 "H₀ rejected at 5%: the VaR model does not match the "
                 "nominal violation rate."
@@ -137,10 +201,32 @@ if run:
                 "H₀ not rejected at 5%: the VaR model's violation rate is "
                 "consistent with the nominal level."
             )
+        if cc["lr_ind"] is None:
+            st.write("**Christoffersen independence:** inconclusive on this sample.")
+        else:
+            st.write(f"**Christoffersen independence LR:** {cc['lr_ind']:.3f}")
+            st.write(f"**Christoffersen independence p-value:** {cc['p_ind']:.4f}")
+        if cc["reject_independence"] is None:
+            st.warning("Independence test inconclusive on this sample.")
+        elif cc["reject_independence"]:
+            st.error(
+                "Independence rejected at 5%: violations cluster in time — "
+                "the model misses regime changes or volatility dynamics."
+            )
+        else:
+            st.success(
+                "Independence not rejected at 5%: no evidence of violation "
+                "clustering."
+            )
+        if cc["p_cc"] is None:
+            st.write("**Conditional coverage:** inconclusive on this sample.")
+        else:
+            st.write(f"**Conditional coverage p-value:** {cc['p_cc']:.4f}")
         st.caption(
-            "Kupiec proportion-of-failures test. A rejected H₀ does not "
-            "invalidate the model outright — it flags a mismatch worth "
-            "investigating (regime change, fat tails, window choice)."
+            "Kupiec proportion-of-failures test + Christoffersen "
+            "independence test. A rejected H₀ does not invalidate the model "
+            "outright — it flags a mismatch worth investigating (regime "
+            "change, fat tails, window choice)."
         )
 
     with tab5:

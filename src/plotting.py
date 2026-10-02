@@ -76,3 +76,33 @@ def stress_bar_chart(stress_df: pd.DataFrame) -> go.Figure:
         yaxis_title="P&L (% of portfolio)",
     )
     return fig
+
+
+def backtest_chart(returns: pd.Series, var_series: pd.Series) -> go.Figure:
+    """Violation timeline: daily returns vs the (lagged) VaR band.
+
+    Red dots mark violations (return worse than -VaR). Clustering of dots
+    is what the Christoffersen independence test formalizes.
+    """
+    aligned = pd.DataFrame({"r": returns, "var": var_series}).dropna()
+    viol = aligned[aligned["r"] < -aligned["var"]]
+    fig = go.Figure()
+    fig.add_scatter(
+        x=aligned.index, y=aligned["r"] * 100, mode="lines",
+        name="Daily return", line=dict(color="steelblue", width=1),
+    )
+    fig.add_scatter(
+        x=aligned.index, y=-aligned["var"] * 100, mode="lines",
+        name="VaR band", line=dict(color="firebrick", dash="dash", width=1),
+    )
+    fig.add_scatter(
+        x=viol.index, y=viol["r"] * 100, mode="markers",
+        name="Violations", marker=dict(color="red", size=6),
+    )
+    fig.update_layout(
+        title="Backtest: daily returns vs lagged VaR",
+        xaxis_title="Date",
+        yaxis_title="Return (%)",
+        hovermode="x unified",
+    )
+    return fig
