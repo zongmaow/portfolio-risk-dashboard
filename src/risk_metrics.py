@@ -214,12 +214,18 @@ def kupiec_pof_test(
 
     Returns violations, expected violations, LR statistic and p-value.
     H0: the observed violation rate equals 1 - confidence.
+
+    Boundary cases are computed, not treated as undefined: with the
+    0*log(0) = 0 continuity convention, zero violations give
+    LR = -2n*log(1 - p0) and all-violations give LR = -2n*log(p0).
+    Only an empty sample (n = 0) has no statistic. The chi-square
+    approximation itself can be rough in small samples.
     """
     aligned = pd.DataFrame({"r": returns, "var": var_series}).dropna()
     n = len(aligned)
     violations = int((aligned["r"] < -aligned["var"]).sum())
     p0 = 1 - confidence
-    if n == 0 or violations in (0, n):
+    if n == 0:
         return {
             "n": n,
             "violations": violations,
@@ -228,11 +234,16 @@ def kupiec_pof_test(
             "p_value": float("nan"),
             "reject_h0": None,
         }
-    p_hat = violations / n
-    lr = -2 * (
-        (n - violations) * np.log((1 - p0) / (1 - p_hat))
-        + violations * np.log(p0 / p_hat)
-    )
+    if violations == 0:
+        lr = -2 * n * np.log(1 - p0)
+    elif violations == n:
+        lr = -2 * n * np.log(p0)
+    else:
+        p_hat = violations / n
+        lr = -2 * (
+            (n - violations) * np.log((1 - p0) / (1 - p_hat))
+            + violations * np.log(p0 / p_hat)
+        )
     p_value = float(1 - stats.chi2.cdf(lr, df=1))
     return {
         "n": n,
@@ -242,6 +253,26 @@ def kupiec_pof_test(
         "p_value": p_value,
         "reject_h0": bool(p_value < 0.05),
     }
+
+
+def quantile_loss(
+    returns: pd.Series, var_series: pd.Series, confidence: float = 0.95
+) -> float:
+    """Mean pinball (quantile) loss of a VaR forecast series.
+
+    Scores the return quantile q_t = -VaR_t at level alpha = 1 - confidence:
+    loss_t = (alpha - 1{r_t < q_t}) * (r_t - q_t). Lower is better. Unlike
+    a pass/fail test, this prices the trade-off between violation counts
+    and band width, so two models should be compared with it on the SAME
+    dates. Returns NaN when no date has both a return and a forecast.
+    """
+    aligned = pd.DataFrame({"r": returns, "var": var_series}).dropna()
+    if aligned.empty:
+        return float("nan")
+    alpha = 1 - confidence
+    q = -aligned["var"]
+    r = aligned["r"]
+    return float(((alpha - (r < q)) * (r - q)).mean())
 
 
 def christoffersen_cc_test(

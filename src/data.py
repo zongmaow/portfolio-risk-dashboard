@@ -4,8 +4,20 @@ Kept free of Streamlit so it can be reused in scripts/tests;
 the app layer adds caching on top.
 """
 
+from pathlib import Path
+
 import pandas as pd
 import yfinance as yf
+
+# Frozen sample: the price snapshot the README and papers report on.
+# Adjusted closes for the default portfolio plus SPY, 2022-01-03 to
+# 2026-10-01, downloaded once from Yahoo Finance and committed to the
+# repo so every reported number is exactly reproducible.
+FROZEN_PRICES_PATH = (
+    Path(__file__).resolve().parent.parent / "data" / "frozen_prices.csv"
+)
+FROZEN_START = "2022-01-03"
+FROZEN_END = "2026-10-01"
 
 # Fallback sector map for the most common tickers, used when
 # yfinance's info endpoint is slow or unavailable.
@@ -46,6 +58,24 @@ def download_prices(tickers: list[str], start: str, end: str) -> pd.DataFrame:
     if closes.empty:
         raise ValueError(f"No price data downloaded for {tickers}.")
     return closes
+
+
+def load_frozen_prices(tickers: list[str] | None = None) -> pd.DataFrame:
+    """Load the frozen price snapshot instead of downloading live data.
+
+    Returns adjusted closes for the requested tickers (all snapshot
+    columns when ``tickers`` is None). Raises ValueError if a requested
+    ticker is not in the snapshot.
+    """
+    prices = pd.read_csv(FROZEN_PRICES_PATH, index_col=0, parse_dates=True)
+    prices.index.name = "Date"
+    if tickers is not None:
+        tickers = [t.strip().upper() for t in tickers if t.strip()]
+        missing = [t for t in tickers if t not in prices.columns]
+        if missing:
+            raise ValueError(f"Not in the frozen snapshot: {missing}.")
+        prices = prices[tickers]
+    return prices
 
 
 def get_sectors(tickers: list[str]) -> dict[str, str]:

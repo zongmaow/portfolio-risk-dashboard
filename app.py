@@ -3,7 +3,7 @@
 import pandas as pd
 import streamlit as st
 
-from src.data import download_prices, get_sectors, sector_exposure
+from src.data import download_prices, get_sectors, load_frozen_prices, sector_exposure
 from src.plotting import (
     backtest_chart,
     correlation_heatmap,
@@ -24,6 +24,7 @@ from src.risk_metrics import (
     kupiec_pof_test,
     max_drawdown,
     portfolio_returns,
+    quantile_loss,
     regime_rolling_var,
     rolling_var,
     sharpe_ratio,
@@ -43,6 +44,12 @@ def cached_prices(tickers: tuple, start: str, end: str) -> pd.DataFrame:
     """Cached market-data download (keeps data.py free of Streamlit)."""
     return download_prices(list(tickers), start, end)
 
+
+@st.cache_data(show_spinner=False)
+def cached_frozen(tickers: tuple) -> pd.DataFrame:
+    """Cached read of the frozen price snapshot."""
+    return load_frozen_prices(list(tickers))
+
 # ---------------- Sidebar ----------------
 st.sidebar.header("Portfolio Setup")
 tickers_input = st.sidebar.text_input(
@@ -52,7 +59,16 @@ weights_input = st.sidebar.text_input(
     "Weights (comma-separated, optional)", value="0.3, 0.25, 0.2, 0.15, 0.1"
 )
 start_date = st.sidebar.date_input("Start date", value=pd.Timestamp("2022-01-01"))
-end_date = st.sidebar.date_input("End date", value=pd.Timestamp.today())
+end_date = st.sidebar.date_input("End date", value=pd.Timestamp("2026-10-01"))
+use_frozen = st.sidebar.checkbox(
+    "Use frozen price snapshot",
+    value=True,
+    help=(
+        "Loads the price snapshot stored in the repo (2022-01-03 – "
+        "2026-10-01, default tickers + SPY) so results are exactly "
+        "reproducible. Uncheck to download live data for the dates above."
+    ),
+)
 confidence = st.sidebar.slider("VaR confidence level", 0.90, 0.99, 0.95, 0.01)
 portfolio_value = st.sidebar.number_input(
     "Current portfolio value ($)", min_value=1000.0, value=1_000_000.0, step=10_000.0
@@ -73,11 +89,32 @@ weights = weights / weights.sum()
 run = st.sidebar.button("Run analysis", type="primary")
 
 if run:
-    with st.spinner("Downloading market data..."):
-        prices = cached_prices(
-            tuple(tickers), str(start_date), str(end_date)
-        )
-        mkt_prices = cached_prices(("SPY",), str(start_date), str(end_date))
+    with st.spinner("Loading market data..."):
+        prices = None
+        if use_frozen:
+            try:
+                prices = cached_frozen(tuple(tickers)).loc[
+                    str(start_date) : str(end_date)
+                ]
+                mkt_prices = cached_frozen(("SPY",)).loc[
+                    str(start_date) : str(end_date)
+                ]
+                if prices.empty or mkt_prices.empty:
+                    prices = None
+            except (ValueError, KeyError):
+                prices = None
+            if prices is None:
+                st.warning(
+                    "Frozen snapshot does not cover that request — "
+                    "downloading live data instead."
+                )
+        if prices is None:
+            prices = cached_prices(
+                tuple(tickers), str(start_date), str(end_date)
+            )
+            mkt_prices = cached_prices(
+                ("SPY",), str(start_date), str(end_date)
+            )
     asset_rets = simple_returns(prices)
     mkt_rets = simple_returns(mkt_prices)["SPY"]
     port_rets = portfolio_returns(asset_rets, weights.loc[prices.columns])
@@ -192,9 +229,8 @@ if run:
             st.write("**Kupiec LR statistic:** n/a")
             st.write("**Kupiec p-value:** n/a")
             st.warning(
-                "Backtest inconclusive: zero (or all) violations, so the "
-                "test statistic is undefined. This is not evidence the "
-                "model is well calibrated."
+                "Backtest inconclusive: no day has both a return and a "
+                "VaR forecast, so there is nothing to test."
             )
         else:
             st.write(f"**Kupiec LR statistic:** {test['lr_stat']:.3f}")
@@ -241,8 +277,9 @@ if run:
         st.write(
             "Each day is classified into a **high/low volatility regime** "
             "from its trailing 21-day realized vol vs. the expanding median "
-            "(both lagged — no look-ahead). VaR is then estimated only from "
-            "past days in the *same* regime, so the band widens automatically "
+            "(both lagged — no look-ahead). VaR is then estimated from the "
+            "most recent 63 past days in the *same* regime (at least 20, "
+            "or no forecast is made), so the band widens automatically "
             "when volatility clusters."
         )
         reg_var = regime_rolling_var(port_rets, confidence=confidence)
@@ -266,37 +303,69 @@ if run:
             ),
             use_container_width=True,
         )
-        # One-line summary generated from the table.
-        def _kupiec_phrase(t):
-            if t["reject_h0"] is None:
-                return "inconclusive (p = n/a)"
-            verdict = "rejected" if t["reject_h0"] else "not rejected"
-            return f"{verdict} (p = {t['p_value']:.3f})"
-
-        if reg_test["violations"] < test["violations"]:
-            change = (
-                f"cuts violations from {test['violations']} to "
-                f"{reg_test['violations']}"
-            )
-        elif reg_test["violations"] > test["violations"]:
-            change = (
-                f"raises violations from {test['violations']} to "
-                f"{reg_test['violations']}"
-            )
-        else:
-            change = f"leaves violations unchanged at {test['violations']}"
-        takeaway = (
-            f"**Summary:** conditioning VaR on the volatility regime "
-            f"{change} (expected ≈ {reg_test['expected']:.1f}). "
-            f"Kupiec H₀: single-window {_kupiec_phrase(test)}; "
-            f"regime-aware {_kupiec_phrase(reg_test)}."
+        st.caption(
+            "Each model is scored on its own valid days above. The "
+            "regime-aware forecast needs a longer warm-up, so the two "
+            "samples differ and the counts are not directly comparable — "
+            "see the common-date comparison below."
         )
-        if cc["p_ind"] is not None and reg_cc["p_ind"] is not None:
-            takeaway += (
-                f" Independence p-value: {cc['p_ind']:.3f} "
-                f"→ {reg_cc['p_ind']:.3f}."
+        # Common-date comparison: restrict both models to the days
+        # where BOTH have a forecast, and score them there.
+        common = pd.DataFrame(
+            {"r": port_rets, "single": rvar, "regime": reg_var}
+        ).dropna()
+        if not common.empty:
+            c_single = kupiec_pof_test(common["r"], common["single"], confidence)
+            c_regime = kupiec_pof_test(common["r"], common["regime"], confidence)
+            comp_common = pd.DataFrame(
+                {
+                    "Violations": [c_single["violations"], c_regime["violations"]],
+                    "Violation rate": [
+                        c_single["violations"] / c_single["n"],
+                        c_regime["violations"] / c_regime["n"],
+                    ],
+                    "Kupiec p-value": [c_single["p_value"], c_regime["p_value"]],
+                    "Mean VaR": [common["single"].mean(), common["regime"].mean()],
+                    "Quantile loss": [
+                        quantile_loss(common["r"], common["single"], confidence),
+                        quantile_loss(common["r"], common["regime"], confidence),
+                    ],
+                },
+                index=["Single-window (63d)", "Regime-aware"],
             )
-        st.info(takeaway)
+            st.markdown(
+                f"**Common-date comparison** — {c_single['n']} days where "
+                "both models have a forecast"
+            )
+            st.dataframe(
+                comp_common.style.format(
+                    {"Violations": "{:.0f}", "Violation rate": "{:.2%}",
+                     "Kupiec p-value": "{:.4f}", "Mean VaR": "{:.2%}",
+                     "Quantile loss": "{:.6f}"},
+                    na_rep="n/a",
+                ),
+                use_container_width=True,
+            )
+
+            # One-line summary generated from the common-date table.
+            def _kupiec_phrase(t):
+                if t["reject_h0"] is None:
+                    return "inconclusive (p = n/a)"
+                verdict = "rejected" if t["reject_h0"] else "not rejected"
+                return f"{verdict} (p = {t['p_value']:.3f})"
+
+            ql_s = quantile_loss(common["r"], common["single"], confidence)
+            ql_r = quantile_loss(common["r"], common["regime"], confidence)
+            takeaway = (
+                f"**Summary:** on the {c_single['n']} common days, "
+                f"violations are {c_single['violations']} (single-window) "
+                f"vs {c_regime['violations']} (regime-aware). Kupiec H₀: "
+                f"single-window {_kupiec_phrase(c_single)}; regime-aware "
+                f"{_kupiec_phrase(c_regime)}. Mean quantile loss: "
+                f"{ql_s:.6f} vs {ql_r:.6f} (lower is better; it prices "
+                "band width as well as violations)."
+            )
+            st.info(takeaway)
         st.plotly_chart(
             backtest_chart(port_rets, reg_var, regimes=reg),
             use_container_width=True,

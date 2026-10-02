@@ -15,6 +15,7 @@ from src.risk_metrics import (
     kupiec_pof_test,
     max_drawdown,
     portfolio_returns,
+    quantile_loss,
     regime_rolling_var,
     rolling_var,
     sharpe_ratio,
@@ -126,6 +127,49 @@ class TestRiskMetrics(unittest.TestCase):
         rvar = rolling_var(self.port, 63, 0.95).shift(1) * 0.1
         res = kupiec_pof_test(self.port, rvar, 0.95)
         self.assertTrue(res["reject_h0"])
+
+    def test_kupiec_zero_violations_boundary(self):
+        # Zero violations is computable, not undefined:
+        # LR = -2n*log(1 - p0) by the 0*log(0) = 0 convention, and a
+        # long-enough run of zero violations rejects H0.
+        n = 250
+        rets = pd.Series(np.full(n, 0.001))
+        var = pd.Series(np.full(n, 0.02))
+        res = kupiec_pof_test(rets, var, 0.95)
+        self.assertEqual(res["violations"], 0)
+        self.assertAlmostEqual(res["lr_stat"], -2 * n * np.log(0.95), places=6)
+        self.assertTrue(res["reject_h0"])
+
+    def test_kupiec_all_violations_boundary(self):
+        # All violations: LR = -2n*log(p0); also computable and rejected.
+        n = 100
+        rets = pd.Series(np.full(n, -0.05))
+        var = pd.Series(np.full(n, 0.02))
+        res = kupiec_pof_test(rets, var, 0.95)
+        self.assertEqual(res["violations"], n)
+        self.assertAlmostEqual(res["lr_stat"], -2 * n * np.log(0.05), places=6)
+        self.assertTrue(res["reject_h0"])
+
+    def test_quantile_loss_prefers_better_forecast(self):
+        # A forecast equal to the true 5% quantile scores better than
+        # one that is far too tight or far too wide.
+        rng = np.random.default_rng(3)
+        rets = pd.Series(rng.normal(0.0, 0.01, 4000))
+        true_var = pd.Series(np.full(4000, 0.0164))  # ~ -q05 of N(0, 0.01)
+        tight = true_var * 0.5
+        wide = true_var * 2.0
+        self.assertLess(
+            quantile_loss(rets, true_var, 0.95),
+            quantile_loss(rets, tight, 0.95),
+        )
+        self.assertLess(
+            quantile_loss(rets, true_var, 0.95),
+            quantile_loss(rets, wide, 0.95),
+        )
+
+    def test_quantile_loss_empty_is_nan(self):
+        empty = pd.Series(dtype=float)
+        self.assertTrue(np.isnan(quantile_loss(empty, empty, 0.95)))
 
     def test_christoffersen_output(self):
         rvar = rolling_var(self.port, 63, 0.95).shift(1)
