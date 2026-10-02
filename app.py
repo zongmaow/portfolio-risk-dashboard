@@ -189,24 +189,27 @@ if run:
             f"**Violations:** {test['violations']} "
             f"(expected ≈ {test['expected']:.1f})"
         )
-        st.write(f"**Kupiec LR statistic:** {test['lr_stat']:.3f}")
-        st.write(f"**Kupiec p-value:** {test['p_value']:.4f}")
         if test["reject_h0"] is None:
+            st.write("**Kupiec LR statistic:** n/a")
+            st.write("**Kupiec p-value:** n/a")
             st.warning(
                 "Backtest inconclusive: zero (or all) violations, so the "
                 "test statistic is undefined. This is not evidence the "
                 "model is well calibrated."
             )
-        elif test["reject_h0"]:
-            st.error(
-                "H₀ rejected at 5%: the VaR model does not match the "
-                "nominal violation rate."
-            )
         else:
-            st.success(
-                "H₀ not rejected at 5%: the VaR model's violation rate is "
-                "consistent with the nominal level."
-            )
+            st.write(f"**Kupiec LR statistic:** {test['lr_stat']:.3f}")
+            st.write(f"**Kupiec p-value:** {test['p_value']:.4f}")
+            if test["reject_h0"]:
+                st.error(
+                    "H₀ rejected at 5%: the VaR model does not match the "
+                    "nominal violation rate."
+                )
+            else:
+                st.success(
+                    "H₀ not rejected at 5%: the VaR model's violation rate is "
+                    "consistent with the nominal level."
+                )
         if cc["lr_ind"] is None:
             st.write("**Christoffersen independence:** inconclusive on this sample.")
         else:
@@ -264,6 +267,44 @@ if run:
             ),
             use_container_width=True,
         )
+        # One-line takeaway generated from the table, so the comparison
+        # states its own conclusion instead of leaving it to the reader.
+        def _kupiec_phrase(t):
+            if t["reject_h0"] is None:
+                return "inconclusive (p = n/a)"
+            verdict = "rejected" if t["reject_h0"] else "not rejected"
+            return f"{verdict} (p = {t['p_value']:.3f})"
+
+        if reg_test["violations"] < test["violations"]:
+            change = (
+                f"cuts violations from {test['violations']} to "
+                f"{reg_test['violations']}"
+            )
+        elif reg_test["violations"] > test["violations"]:
+            change = (
+                f"raises violations from {test['violations']} to "
+                f"{reg_test['violations']}"
+            )
+        else:
+            change = f"leaves violations unchanged at {test['violations']}"
+        takeaway = (
+            f"**Takeaway:** conditioning VaR on the volatility regime "
+            f"{change} (expected ≈ {reg_test['expected']:.1f}). "
+            f"Kupiec H₀: single-window {_kupiec_phrase(test)}; "
+            f"regime-aware {_kupiec_phrase(reg_test)}."
+        )
+        if cc["p_ind"] is not None and reg_cc["p_ind"] is not None:
+            takeaway += (
+                f" Independence p-value: {cc['p_ind']:.3f} "
+                f"→ {reg_cc['p_ind']:.3f}."
+            )
+        if test["reject_h0"] and reg_test["reject_h0"] is False:
+            takeaway += (
+                " The single-window rejection disappears once the regime "
+                "is conditioned on — the failure came from volatility "
+                "regime change, not a mis-estimated quantile."
+            )
+        st.info(takeaway)
         st.plotly_chart(
             backtest_chart(port_rets, reg_var, regimes=reg),
             use_container_width=True,
